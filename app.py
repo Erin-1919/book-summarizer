@@ -1,13 +1,12 @@
 import os
 import json
 import uuid
+import base64
 from datetime import datetime
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
-from PIL import Image
-import pytesseract
 import fitz  # PyMuPDF
 from openai import OpenAI
 
@@ -22,8 +21,7 @@ ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "tiff", "pdf"}
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Uncomment and set if Tesseract is not on PATH:
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "tiff"}
 
 
 def allowed_file(filename):
@@ -49,11 +47,53 @@ def find_book(data, book_id):
     return next((b for b in data["books"] if b["id"] == book_id), None)
 
 
-def extract_text_from_image(image_path):
-    with Image.open(image_path) as img:
-        img = img.convert("RGB")
-        text = pytesseract.image_to_string(img)
-    return text.strip()
+def extract_and_summarize_image(image_path):
+    with open(image_path, "rb") as f:
+        image_data = base64.standard_b64encode(f.read()).decode("utf-8")
+    ext = image_path.rsplit(".", 1)[-1].lower()
+    mime_types = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "bmp": "image/bmp", "tiff": "image/tiff"}
+    mime = mime_types.get(ext, "image/jpeg")
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful reading assistant. The user will provide a photo of a book page. "
+                    "First, extract all the text you can read from the image. "
+                    "Then, summarize focusing on the 'Key Points' section — bullet points typically at the top of the page. "
+                    "Write exactly one paragraph per bullet point. The number of paragraphs must match the number of bullet points. "
+                    "State the ideas and opinions directly as facts. "
+                    "Do NOT use phrases like 'the text suggests', 'the author argues', 'the excerpt discusses', etc. "
+                    "Just state the points.\n\n"
+                    "Format your response exactly as:\n"
+                    "---EXTRACTED TEXT---\n<the full extracted text>\n---SUMMARY---\n<the summary>"
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{image_data}"},
+                    },
+                ],
+            },
+        ],
+        temperature=0.3,
+    )
+    result = response.choices[0].message.content.strip()
+
+    if "---EXTRACTED TEXT---" in result and "---SUMMARY---" in result:
+        parts = result.split("---SUMMARY---", 1)
+        extracted = parts[0].replace("---EXTRACTED TEXT---", "").strip()
+        summary = parts[1].strip()
+    else:
+        extracted = result
+        summary = result
+
+    return extracted, summary
 
 
 def extract_text_from_pdf(pdf_path):
@@ -65,13 +105,6 @@ def extract_text_from_pdf(pdf_path):
             texts.append(text.strip())
     doc.close()
     return "\n\n".join(texts)
-
-
-def extract_text(filepath):
-    ext = filepath.rsplit(".", 1)[-1].lower()
-    if ext == "pdf":
-        return extract_text_from_pdf(filepath)
-    return extract_text_from_image(filepath)
 
 
 def summarize_text(text):
@@ -121,37 +154,79 @@ def index():
 
 @app.route("/upload", methods=["POST"])
 def upload():
+    """Step 1: Save uploaded files temporarily and return file list for order confirmation."""
     files = request.files.getlist("file")
     if not files or all(f.filename == "" for f in files):
         return jsonify({"error": "No file uploaded"}), 400
     for f in files:
         if not allowed_file(f.filename):
-            return jsonify({"error": f"Invalid file type: {f.filename}. Use JPG, PNG, BMP, or TIFF."}), 400
+            return jsonify({"error": f"Invalid file type: {f.filename}. Use JPG, PNG, BMP, TIFF, or PDF."}), 400
 
-    book_id = request.form.get("book_id")
-    chapter_id = request.form.get("chapter_id")
-    subchapter_id = request.form.get("subchapter_id")
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+    uploaded = []
+    for f in files:
+        file_id = uuid.uuid4().hex[:8]
+        original_name = f.filename
+        ext = original_name.rsplit(".", 1)[-1].lower()
+        saved_name = f"{file_id}.{ext}"
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], saved_name)
+        f.save(filepath)
+        uploaded.append({"id": file_id, "name": original_name, "saved": saved_name})
+
+    return jsonify({"success": True, "files": uploaded})
+
+
+@app.route("/process", methods=["POST"])
+def process():
+    """Step 2: Process files in the confirmed order, extract text, summarize, and save."""
+    body = request.json
+    file_ids = body.get("file_ids", [])
+    book_id = body.get("book_id", "")
+    chapter_id = body.get("chapter_id", "")
+    subchapter_id = body.get("subchapter_id", "")
+
+    if not file_ids:
+        return jsonify({"error": "No files to process."}), 400
     if not book_id or not chapter_id or not subchapter_id:
         return jsonify({"error": "Please select a book, chapter, and sub-chapter."}), 400
 
-    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+    # Resolve file paths in the given order
     saved_paths = []
-    for f in files:
-        filename = secure_filename(f"{uuid.uuid4().hex}_{f.filename}")
-        filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-        f.save(filepath)
-        saved_paths.append(filepath)
+    for fid in file_ids:
+        # Find the file by id prefix
+        matches = [f for f in os.listdir(app.config["UPLOAD_FOLDER"]) if f.startswith(fid + ".")]
+        if not matches:
+            return jsonify({"error": f"File {fid} not found. It may have expired."}), 404
+        saved_paths.append(os.path.join(app.config["UPLOAD_FOLDER"], matches[0]))
 
     try:
         all_texts = []
+        all_summaries = []
+        pdf_texts = []
+
         for filepath in saved_paths:
-            text = extract_text(filepath)
-            if text:
-                all_texts.append(text)
+            ext = filepath.rsplit(".", 1)[-1].lower()
+            if ext in IMAGE_EXTENSIONS:
+                extracted, summary = extract_and_summarize_image(filepath)
+                if extracted:
+                    all_texts.append(extracted)
+                    all_summaries.append(summary)
+            elif ext == "pdf":
+                text = extract_text_from_pdf(filepath)
+                if text:
+                    pdf_texts.append(text)
+                    all_texts.append(text)
+
         if not all_texts:
-            return jsonify({"error": "Could not extract any text from the images."}), 400
+            return jsonify({"error": "Could not extract any text from the files."}), 400
+
+        # Summarize PDF texts separately, then combine all summaries
+        if pdf_texts:
+            pdf_summary = summarize_text("\n\n".join(pdf_texts))
+            all_summaries.append(pdf_summary)
+
         extracted_text = "\n\n".join(all_texts)
-        summary = summarize_text(extracted_text)
+        summary = "\n\n".join(all_summaries)
     finally:
         for filepath in saved_paths:
             if os.path.exists(filepath):

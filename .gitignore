@@ -4,3 +4,5 @@ uploads/
 __pycache__/
 data/
 *.pyc
+.vscode/
+.claude/

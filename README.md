@@ -1,14 +1,15 @@
 # Book Page Summarizer
 
-A reading companion app that extracts text from photos of book pages using OCR and generates AI-powered summaries. Summaries are organized by book, chapter, and sub-chapter, and persist locally across sessions.
+A reading companion app that extracts text from photos of book pages and generates AI-powered summaries. Images are sent directly to GPT-4o's vision capability, which reads and summarizes in one step. PDFs use PyMuPDF for text extraction. Summaries are organized by book, chapter, and sub-chapter, and persist locally across sessions.
 
 Currently pre-loaded with the structure for **Prediction Machines** by Ajay Agrawal, Joshua Gans, and Avi Goldfarb. You can add more books through the UI.
 
 ## Features
 
 - Upload one or multiple files at once — images (JPG, PNG, BMP, TIFF) or PDFs
-- OCR text extraction via Tesseract (images), direct text extraction via PyMuPDF (PDFs)
-- AI summarization via OpenAI GPT-4o (focuses on "Key Points" sections)
+- GPT-4o vision reads and summarizes book page images in one API call
+- Direct text extraction via PyMuPDF for PDFs, then GPT-4o summarization
+- Summaries focus on "Key Points" sections
 - Organize summaries by book > chapter/part > sub-chapter
 - Re-uploading to a sub-chapter overwrites the previous summary
 - All data persists in a local JSON file
@@ -16,11 +17,7 @@ Currently pre-loaded with the structure for **Prediction Machines** by Ajay Agra
 ## Prerequisites
 
 1. **Python 3.10+**
-2. **Tesseract OCR** — download and install from [UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki). If not added to PATH, update the path in `app.py`:
-   ```python
-   pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-   ```
-3. **OpenAI API key**
+2. **OpenAI API key**
 
 ## Setup
 
