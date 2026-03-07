@@ -279,5 +279,102 @@ document.getElementById('bookAuthorsInput').addEventListener('keydown', e => { i
 document.getElementById('chapterNameInput').addEventListener('keydown', e => { if (e.key === 'Enter') createChapter(); });
 document.getElementById('subchapterNameInput').addEventListener('keydown', e => { if (e.key === 'Enter') createSubchapter(); });
 
+// --- Google Photos Import ---
+let pickerPollTimer = null;
+
+async function startGooglePhotosImport() {
+  // Check if authenticated
+  try {
+    const statusRes = await fetch('/google/status');
+    const statusData = await statusRes.json();
+    if (!statusData.authenticated) {
+      window.location.href = '/google/auth';
+      return;
+    }
+  } catch (err) {
+    alert('Could not check Google authentication status.');
+    return;
+  }
+
+  // Show modal and create picker session
+  const modal = document.getElementById('googlePickerModal');
+  const statusEl = document.getElementById('googlePickerStatus');
+  const link = document.getElementById('googlePickerLink');
+  const polling = document.getElementById('googlePickerPolling');
+
+  statusEl.textContent = 'Creating picker session...';
+  link.style.display = 'none';
+  polling.style.display = 'none';
+  modal.classList.add('show');
+
+  try {
+    const res = await fetch('/google/picker/create', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      statusEl.textContent = data.error || 'Failed to create picker session.';
+      return;
+    }
+    statusEl.textContent = 'Select your photos in the Google Photos tab:';
+    link.href = data.pickerUri;
+    link.style.display = 'block';
+    polling.style.display = 'block';
+    pollPickerSession(data.sessionId);
+  } catch (err) {
+    statusEl.textContent = 'Network error creating picker session.';
+  }
+}
+
+function pollPickerSession(sessionId) {
+  if (pickerPollTimer) clearInterval(pickerPollTimer);
+  pickerPollTimer = setInterval(async () => {
+    try {
+      const res = await fetch(`/google/picker/poll/${sessionId}`);
+      const data = await res.json();
+      if (!res.ok) {
+        clearInterval(pickerPollTimer);
+        pickerPollTimer = null;
+        document.getElementById('googlePickerStatus').textContent = data.error || 'Polling error.';
+        return;
+      }
+      if (!data.ready) return;
+
+      // Photos selected — stop polling and import
+      clearInterval(pickerPollTimer);
+      pickerPollTimer = null;
+      document.getElementById('googlePickerStatus').textContent = 'Downloading selected photos...';
+      document.getElementById('googlePickerLink').style.display = 'none';
+      document.getElementById('googlePickerPolling').style.display = 'none';
+
+      const importRes = await fetch('/google/picker/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: data.items }),
+      });
+      const importData = await importRes.json();
+      document.getElementById('googlePickerModal').classList.remove('show');
+
+      if (!importRes.ok) {
+        document.getElementById('statusMsg').className = 'status-msg error';
+        document.getElementById('statusMsg').textContent = importData.error || 'Import failed.';
+        return;
+      }
+      pendingFiles = importData.files;
+      showFileOrderPanel();
+    } catch (err) {
+      clearInterval(pickerPollTimer);
+      pickerPollTimer = null;
+      document.getElementById('googlePickerStatus').textContent = 'Network error while polling.';
+    }
+  }, 5000);
+}
+
+function cancelGooglePicker() {
+  if (pickerPollTimer) {
+    clearInterval(pickerPollTimer);
+    pickerPollTimer = null;
+  }
+  document.getElementById('googlePickerModal').classList.remove('show');
+}
+
 // --- Init on load ---
 updateSubchapterSelect();

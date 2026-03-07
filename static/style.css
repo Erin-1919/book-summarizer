@@ -457,3 +457,47 @@ header .tagline {
   font-family: var(--sans);
 }
 .toggle-extracted:hover { text-decoration: underline; }
+
+/* --- Upload divider --- */
+.upload-divider {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 1rem 0;
+  color: var(--brown-light);
+  font-size: 0.85rem;
+}
+.upload-divider::before,
+.upload-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* --- Google Photos button --- */
+.btn-google {
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  font-weight: 600;
+  background: white;
+  color: var(--charcoal);
+  border: 1px solid var(--border);
+  padding: 0.55rem 1.4rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: inline-flex;
+  align-items: center;
+}
+.btn-google:hover {
+  border-color: var(--gold);
+  background: var(--cream);
+}
+
+/* --- Google picker modal status --- */
+.google-picker-status {
+  font-size: 0.9rem;
+  color: var(--brown-light);
+  margin-bottom: 0.5rem;
+}

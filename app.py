@@ -4,24 +4,38 @@ import uuid
 import base64
 from datetime import datetime
 
-from flask import Flask, render_template, request, jsonify, redirect, url_for
+from flask import Flask, render_template, request, jsonify, redirect, url_for, session
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
 import fitz  # PyMuPDF
 from openai import OpenAI
+import requests as http_requests
+from google_auth_oauthlib.flow import Flow
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request as GoogleAuthRequest
 
 load_dotenv()
 
+# Allow OAuth over HTTP for local development
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
 app = Flask(__name__)
+app.secret_key = os.getenv("FLASK_SECRET_KEY", os.urandom(24).hex())
 app.config["UPLOAD_FOLDER"] = os.path.join(os.path.dirname(__file__), "uploads")
 app.config["DATA_FILE"] = os.path.join(os.path.dirname(__file__), "data", "summaries.json")
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16MB max upload
 
-ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "tiff", "pdf"}
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "tiff", "pdf", "webp"}
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "tiff"}
+IMAGE_EXTENSIONS = {"jpg", "jpeg", "png", "bmp", "tiff", "webp"}
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_SCOPES = ["https://www.googleapis.com/auth/photospicker.mediaitems.readonly"]
+GOOGLE_REDIRECT_URI = "http://localhost:5000/google/callback"
+PICKER_API_BASE = "https://photospicker.googleapis.com/v1"
 
 
 def allowed_file(filename):
@@ -51,7 +65,7 @@ def extract_and_summarize_image(image_path):
     with open(image_path, "rb") as f:
         image_data = base64.standard_b64encode(f.read()).decode("utf-8")
     ext = image_path.rsplit(".", 1)[-1].lower()
-    mime_types = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "bmp": "image/bmp", "tiff": "image/tiff"}
+    mime_types = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "bmp": "image/bmp", "tiff": "image/tiff", "webp": "image/webp"}
     mime = mime_types.get(ext, "image/jpeg")
 
     response = client.chat.completions.create(
@@ -329,6 +343,178 @@ def delete_summary(summary_id):
                         save_data(data)
                         return jsonify({"success": True})
     return jsonify({"error": "Summary not found."}), 404
+
+
+def get_google_credentials():
+    cred_data = session.get("google_credentials")
+    if not cred_data:
+        return None
+    creds = Credentials(
+        token=cred_data["token"],
+        refresh_token=cred_data.get("refresh_token"),
+        token_uri=cred_data["token_uri"],
+        client_id=cred_data["client_id"],
+        client_secret=cred_data["client_secret"],
+        scopes=cred_data.get("scopes"),
+    )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(GoogleAuthRequest())
+        session["google_credentials"] = {
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+            "scopes": list(creds.scopes) if creds.scopes else [],
+        }
+    if not creds.valid:
+        return None
+    return creds
+
+
+def _build_google_flow():
+    return Flow.from_client_config(
+        {
+            "web": {
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        },
+        scopes=GOOGLE_SCOPES,
+        redirect_uri=GOOGLE_REDIRECT_URI,
+    )
+
+
+@app.route("/google/auth")
+def google_auth():
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        return jsonify({"error": "Google credentials not configured."}), 500
+    flow = _build_google_flow()
+    auth_url, state = flow.authorization_url(
+        access_type="offline", include_granted_scopes="true", prompt="consent"
+    )
+    session["google_oauth_state"] = state
+    # Store code_verifier for PKCE (needed in callback)
+    session["google_code_verifier"] = flow.code_verifier
+    return redirect(auth_url)
+
+
+@app.route("/google/callback")
+def google_callback():
+    flow = _build_google_flow()
+    flow.code_verifier = session.pop("google_code_verifier", None)
+    flow.fetch_token(code=request.args.get("code"))
+    creds = flow.credentials
+    session["google_credentials"] = {
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "scopes": list(creds.scopes) if creds.scopes else [],
+    }
+    return redirect(url_for("index"))
+
+
+@app.route("/google/status")
+def google_status():
+    creds = get_google_credentials()
+    return jsonify({"authenticated": creds is not None})
+
+
+@app.route("/google/picker/create", methods=["POST"])
+def google_picker_create():
+    creds = get_google_credentials()
+    if not creds:
+        return jsonify({"error": "Not authenticated with Google."}), 401
+    resp = http_requests.post(
+        f"{PICKER_API_BASE}/sessions",
+        headers={"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"},
+    )
+    if not resp.ok:
+        return jsonify({"error": f"Picker API error: {resp.text}"}), resp.status_code
+    data = resp.json()
+    return jsonify({
+        "pickerUri": data.get("pickerUri", ""),
+        "sessionId": data.get("id", ""),
+    })
+
+
+@app.route("/google/picker/poll/<session_id>")
+def google_picker_poll(session_id):
+    creds = get_google_credentials()
+    if not creds:
+        return jsonify({"error": "Not authenticated with Google."}), 401
+    resp = http_requests.get(
+        f"{PICKER_API_BASE}/sessions/{session_id}",
+        headers={"Authorization": f"Bearer {creds.token}"},
+    )
+    if not resp.ok:
+        return jsonify({"error": f"Picker API error: {resp.text}"}), resp.status_code
+    data = resp.json()
+    media_items_set = data.get("mediaItemsSet", False)
+    if not media_items_set:
+        return jsonify({"ready": False})
+
+    # Fetch the selected media items
+    items_resp = http_requests.get(
+        f"{PICKER_API_BASE}/sessions/{session_id}/mediaItems",
+        headers={"Authorization": f"Bearer {creds.token}"},
+    )
+    if not items_resp.ok:
+        return jsonify({"error": f"Failed to fetch media items: {items_resp.text}"}), items_resp.status_code
+    items_data = items_resp.json()
+    media_items = items_data.get("mediaItems", [])
+    items_out = []
+    for item in media_items:
+        items_out.append({
+            "id": item.get("id", ""),
+            "baseUrl": item.get("mediaFile", {}).get("baseUrl", ""),
+            "mimeType": item.get("mediaFile", {}).get("mimeType", "image/jpeg"),
+            "filename": item.get("mediaFile", {}).get("filename", "photo.jpg"),
+        })
+    return jsonify({"ready": True, "items": items_out})
+
+
+@app.route("/google/picker/import", methods=["POST"])
+def google_picker_import():
+    items = request.json.get("items", [])
+    if not items:
+        return jsonify({"error": "No items to import."}), 400
+
+    os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
+    uploaded = []
+    for item in items:
+        base_url = item.get("baseUrl", "")
+        original_name = item.get("filename", "photo.jpg")
+        mime_type = item.get("mimeType", "image/jpeg")
+        if not base_url:
+            continue
+        # Download the image at full resolution
+        download_url = f"{base_url}=d"
+        resp = http_requests.get(download_url, timeout=30)
+        if not resp.ok:
+            continue
+        # Determine extension from mime type
+        mime_to_ext = {
+            "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp",
+            "image/bmp": "bmp", "image/tiff": "tiff",
+        }
+        ext = mime_to_ext.get(mime_type, original_name.rsplit(".", 1)[-1].lower() if "." in original_name else "jpg")
+        if ext not in ALLOWED_EXTENSIONS:
+            continue
+        file_id = uuid.uuid4().hex[:8]
+        saved_name = f"{file_id}.{ext}"
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], saved_name)
+        with open(filepath, "wb") as f:
+            f.write(resp.content)
+        uploaded.append({"id": file_id, "name": original_name, "saved": saved_name})
+
+    if not uploaded:
+        return jsonify({"error": "Could not download any images."}), 400
+    return jsonify({"success": True, "files": uploaded})
 
 
 if __name__ == "__main__":
