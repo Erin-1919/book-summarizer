@@ -1,0 +1,6 @@
+flask
+pytesseract
+Pillow
+openai
+python-dotenv
+PyMuPDF
