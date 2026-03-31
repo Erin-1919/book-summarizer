@@ -57,11 +57,30 @@ GOOGLE_CLIENT_SECRET=your-client-secret
 
 ## Run
 
+### Desktop App (recommended)
+
+Double-click `start.bat` or use the desktop shortcut to launch the app in a native window (no browser needed).
+
 ```bash
+# Or from the command line:
 python app.py
 ```
 
+### Browser Mode
+
+```bash
+python server.py
+```
+
 Open http://localhost:5000 in your browser.
+
+### Desktop Shortcut
+
+To create a Windows desktop shortcut with a custom icon:
+
+```bash
+python create_shortcut.py
+```
 
 ## Usage
 

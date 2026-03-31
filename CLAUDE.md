@@ -12,6 +12,9 @@ source .venv/Scripts/activate
 pip install -r requirements.txt
 
 # Run dev server (http://localhost:5000)
+python server.py
+
+# Run as desktop app (PyWebView window)
 python app.py
 ```
 
@@ -19,7 +22,7 @@ Requires a `.env` file with `OPENAI_API_KEY=sk-...`. Optionally `GOOGLE_CLIENT_I
 
 ## Architecture
 
-Single-file Flask app (`app.py`) with one Jinja template, static CSS/JS, and a JSON file for persistence.
+Single-file Flask app (`server.py`) with one Jinja template, static CSS/JS, and a JSON file for persistence. `app.py` is the PyWebView desktop wrapper that starts the Flask server in a daemon thread.
 
 ### Processing Flow
 
